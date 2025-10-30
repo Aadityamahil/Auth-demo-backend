@@ -64,10 +64,11 @@ router.post('/login', async (req, res) => {
       { expiresIn: '15m' }
     );
 
+    const isProd = process.env.NODE_ENV === 'production'
     res.cookie('token', token, {
       httpOnly: true,
-      secure: false,
-      sameSite: 'strict',
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'strict',
       maxAge: 15 * 60 * 1000,
     });
 
