@@ -22,12 +22,14 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// Login with device check
+// Login with device check (binds to FingerprintJS visitorId if provided)
 router.post('/login', async (req, res) => {
   try {
-    const { email, password, deviceIdRaw } = req.body;
-    if (!email || !password || !deviceIdRaw) {
-      return res.status(400).json({ message: 'Missing email/password/deviceId' });
+    const { email, password } = req.body;
+    // Prefer FingerprintJS visitorId from header or body; fall back to legacy deviceIdRaw
+    const fpVisitorId = req.headers['x-fp-visitor-id'] || req.body.fpVisitorId || req.body.deviceIdRaw;
+    if (!email || !password || !fpVisitorId) {
+      return res.status(400).json({ message: 'Missing email/password/fingerprint' });
     }
 
     const user = await User.findOne({ email });
@@ -36,7 +38,7 @@ router.post('/login', async (req, res) => {
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
 
-    const incomingDeviceHash = sha256Hex(deviceIdRaw);
+    const incomingDeviceHash = sha256Hex(fpVisitorId);
     // Debug log for troubleshooting device binding
     console.log('[AUTH] Login attempt', {
       email,
