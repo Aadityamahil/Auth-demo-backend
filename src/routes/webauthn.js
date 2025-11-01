@@ -15,8 +15,33 @@ const router = express.Router();
 
 // Relying Party (RP) config
 const rpName = process.env.WEBAUTHN_RP_NAME || 'Auth Demo';
-const rpID = process.env.WEBAUTHN_RP_ID || 'localhost';
-const origin = process.env.WEBAUTHN_ORIGIN || 'http://localhost:5173';
+
+// For Safari on iOS, RP ID and Origin must match the frontend domain exactly
+// Extract from CORS_ORIGIN (frontend URL) or use explicit env vars
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const explicitOrigin = process.env.WEBAUTHN_ORIGIN || corsOrigin;
+const explicitRPID = process.env.WEBAUTHN_RP_ID;
+
+// If RP ID not explicitly set, extract domain from origin
+let rpID;
+let origin;
+if (explicitRPID) {
+  rpID = explicitRPID;
+  origin = explicitOrigin;
+} else {
+  // Extract domain from origin URL (e.g., "https://example.com" -> "example.com")
+  try {
+    const originUrl = new URL(explicitOrigin);
+    rpID = originUrl.hostname;
+    origin = explicitOrigin;
+  } catch (e) {
+    // Fallback for localhost
+    rpID = 'localhost';
+    origin = 'http://localhost:5173';
+  }
+}
+
+console.log('[WEBAUTHN] Configuration:', { rpName, rpID, origin });
 
 // In-memory challenge store for demo; in production, bind to user/session store
 const challengeStore = new Map(); // key: email, value: challenge
@@ -39,8 +64,9 @@ router.post('/register/start', async (req, res) => {
     attestationType: 'none',
     authenticatorSelection: {
       residentKey: 'preferred',
-      userVerification: 'required',
-      authenticatorAttachment: 'platform', // prefer device-bound
+      userVerification: 'preferred', // Changed from 'required' for better Safari compatibility
+      // Removed authenticatorAttachment: 'platform' - Safari works better without this restriction
+      // It will prefer platform authenticators but won't fail if cross-platform is used
     },
     excludeCredentials: user.webauthnCredentials.map((cred) => ({
       id: Buffer.from(cred.credentialID).toString('base64url'),
@@ -84,6 +110,8 @@ router.post('/register/start', async (req, res) => {
     challengeForStorage = new Uint8Array(buf);
   }
 
+  // Use authenticatorSelection from options (already configured for Safari compatibility)
+  // Build normalized object with all required fields, excluding undefined values
   const normalized = {
     challenge: toB64Url(options.challenge),
     rp: { name: rpName, id: rpID },
@@ -92,18 +120,17 @@ router.post('/register/start', async (req, res) => {
       name: user.email,
       displayName: user.email,
     },
-    pubKeyCredParams: [
+    pubKeyCredParams: options.pubKeyCredParams || [
       { type: 'public-key', alg: -7 },   // ES256
       { type: 'public-key', alg: -257 }, // RS256
     ],
-    timeout: 60000,
-    attestation: 'none',
-    authenticatorSelection: {
+    timeout: options.timeout || 60000,
+    attestation: options.attestation || 'none',
+    // Use authenticatorSelection from generated options (Safari-compatible settings)
+    authenticatorSelection: options.authenticatorSelection || {
       residentKey: 'preferred',
-      userVerification: 'required',
-      authenticatorAttachment: 'platform',
+      userVerification: 'preferred',
     },
-    extensions: options.extensions || undefined,
     excludeCredentials: Array.isArray(options.excludeCredentials)
       ? options.excludeCredentials.map((cred) => ({
           type: 'public-key',
@@ -113,8 +140,48 @@ router.post('/register/start', async (req, res) => {
       : [],
   };
 
+  // Only include extensions if they exist (Chrome doesn't like undefined fields)
+  if (options.extensions && Object.keys(options.extensions).length > 0) {
+    normalized.extensions = options.extensions;
+  }
+
+  // Validate all required fields are present and properly formatted
+  if (!normalized.challenge || typeof normalized.challenge !== 'string') {
+    console.error('[WEBAUTHN] Invalid challenge:', normalized.challenge);
+    return res.status(500).json({ message: 'Failed to generate registration challenge' });
+  }
+  if (!normalized.rp || !normalized.rp.id || !normalized.rp.name) {
+    console.error('[WEBAUTHN] Invalid RP config:', normalized.rp);
+    return res.status(500).json({ message: 'Invalid RP configuration' });
+  }
+  if (!normalized.user || !normalized.user.id || !normalized.user.name) {
+    console.error('[WEBAUTHN] Invalid user config:', normalized.user);
+    return res.status(500).json({ message: 'Invalid user configuration' });
+  }
+
+  // Log RP config for Safari debugging (after normalized is created)
+  const userAgent = req.headers['user-agent'] || 'unknown';
+  const isSafariIOS = /iPhone|iPad|iPod/i.test(userAgent) && /Safari/i.test(userAgent);
+  console.log('[WEBAUTHN] register/start - RP config:', {
+    rpName,
+    rpID,
+    origin,
+    userAgent: userAgent.substring(0, 80),
+    isSafariIOS,
+    requestOrigin: req.headers.origin,
+    authenticatorSelection: normalized.authenticatorSelection,
+  });
+
   // Temporary debug: log the keys sent to client (no secrets)
   console.log('[WEBAUTHN] register/start options keys:', Object.keys(normalized));
+  console.log('[WEBAUTHN] register/start normalized structure:', {
+    hasChallenge: !!normalized.challenge,
+    challengeLength: normalized.challenge?.length,
+    rpId: normalized.rp?.id,
+    userIdLength: normalized.user?.id?.length,
+    hasAuthenticatorSelection: !!normalized.authenticatorSelection,
+    pubKeyCredParamsCount: normalized.pubKeyCredParams?.length,
+  });
 
   // Debug: log what we're storing
   console.log('[WEBAUTHN] register/start - Storing challenge:', {
@@ -171,6 +238,20 @@ router.post('/register/finish', async (req, res) => {
 
   let verification;
   try {
+    console.log('[WEBAUTHN] register/finish - Verification config:', {
+      expectedRPID: rpID,
+      expectedOrigin: origin,
+      clientDataJSON_origin: attestationResponse?.response?.clientDataJSON ? 
+        (() => {
+          try {
+            const c = JSON.parse(Buffer.from(attestationResponse.response.clientDataJSON, 'base64url').toString());
+            return c.origin;
+          } catch (e) {
+            return 'cannot parse';
+          }
+        })() : 'missing',
+    });
+
     verification = await verifyRegistrationResponse({
       response: attestationResponse,
       expectedChallenge: challengeForVerification,
@@ -181,10 +262,22 @@ router.post('/register/finish', async (req, res) => {
     console.error('[WEBAUTHN] register/finish verification error:', {
       error_message: e.message,
       error_stack: e.stack,
+      expectedRPID: rpID,
+      expectedOrigin: origin,
       challenge_type: challengeForVerification.constructor.name,
       challenge_length: challengeForVerification.length,
       challenge_is_uint8array: challengeForVerification instanceof Uint8Array,
       challenge_is_buffer: Buffer.isBuffer(challengeForVerification),
+      // Try to extract origin from clientDataJSON for debugging
+      clientDataJSON_origin: attestationResponse?.response?.clientDataJSON ? 
+        (() => {
+          try {
+            const c = JSON.parse(Buffer.from(attestationResponse.response.clientDataJSON, 'base64url').toString());
+            return c.origin;
+          } catch (e) {
+            return 'cannot parse';
+          }
+        })() : 'missing',
     });
     return res.status(400).json({ 
       message: 'Registration verification failed',
