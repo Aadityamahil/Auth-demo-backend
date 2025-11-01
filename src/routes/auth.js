@@ -12,12 +12,38 @@ router.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Email and password required' });
+    
+    // Get FingerprintJS visitorId for device binding (browser-specific, which is fine for password login)
+    const fpVisitorId = req.headers['x-fp-visitor-id'] || req.body.fpVisitorId || req.body.deviceIdRaw;
+    
     const existing = await User.findOne({ email });
     if (existing) return res.status(409).json({ message: 'User already exists' });
+    
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = await User.create({ email, passwordHash });
-    return res.status(201).json({ message: 'Registered', email: user.email });
+    
+    // Create user with device ID if provided
+    const userData = { email, passwordHash };
+    if (fpVisitorId) {
+      const deviceHash = sha256Hex(fpVisitorId);
+      userData.registeredDeviceIdHash = deviceHash;
+      userData.registeredAt = new Date();
+      console.log('[AUTH] Register - Device ID stored:', {
+        email,
+        deviceHash,
+        hasVisitorId: !!fpVisitorId,
+      });
+    } else {
+      console.warn('[AUTH] Register - No device fingerprint provided');
+    }
+    
+    const user = await User.create(userData);
+    return res.status(201).json({ 
+      message: 'Registered', 
+      email: user.email,
+      deviceIdHash: user.registeredDeviceIdHash,
+    });
   } catch (err) {
+    console.error('[AUTH] Registration error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 });
