@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 // const base64url = require('base64url');
 // const { randomUUID } = require('crypto');
 const User = require('../models/User');
+const { sha256Hex } = require('../utils/hashDevice');
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -201,6 +202,9 @@ router.post('/register/finish', async (req, res) => {
   const { email, attestationResponse } = req.body;
   if (!email || !attestationResponse) return res.status(400).json({ message: 'Missing fields' });
 
+  // Get device fingerprint (FingerprintJS visitorId) for device binding
+  const fpVisitorId = req.headers['x-fp-visitor-id'] || req.body.fpVisitorId || req.body.deviceIdRaw;
+
   const storedChallenge = challengeStore.get(email);
   if (!storedChallenge) return res.status(400).json({ message: 'No registration in progress' });
 
@@ -342,6 +346,28 @@ router.post('/register/finish', async (req, res) => {
       aaguid,
       transports: attestationResponse.response.transports || [],
     });
+    
+    // Register device ID when passkey is registered (similar to password login)
+    if (fpVisitorId) {
+      const incomingDeviceHash = sha256Hex(fpVisitorId);
+      if (!user.registeredDeviceIdHash) {
+        user.registeredDeviceIdHash = incomingDeviceHash;
+        user.registeredAt = new Date();
+        console.log('[WEBAUTHN] register/finish - Device registered with passkey', {
+          email,
+          deviceHash: incomingDeviceHash,
+        });
+      } else {
+        console.log('[WEBAUTHN] register/finish - Device already registered', {
+          email,
+          storedDeviceHash: user.registeredDeviceIdHash,
+          incomingDeviceHash,
+        });
+      }
+    } else {
+      console.warn('[WEBAUTHN] register/finish - No device fingerprint provided');
+    }
+    
     await user.save();
     console.log('[WEBAUTHN] register/finish - Credential saved successfully', { counter: credentialCounter });
   } else {
@@ -435,6 +461,9 @@ router.post('/login/start', async (req, res) => {
 router.post('/login/finish', async (req, res) => {
   const { email, assertionResponse } = req.body;
   if (!email || !assertionResponse) return res.status(400).json({ message: 'Missing fields' });
+
+  // Get device fingerprint (FingerprintJS visitorId) for device binding
+  const fpVisitorId = req.headers['x-fp-visitor-id'] || req.body.fpVisitorId || req.body.deviceIdRaw;
 
   const expectedChallenge = challengeStore.get(email);
   if (!expectedChallenge) return res.status(400).json({ message: 'No login in progress' });
@@ -677,9 +706,37 @@ router.post('/login/finish', async (req, res) => {
   // Update counter to prevent replay
   if (dbAuthenticator) {
     dbAuthenticator.counter = authenticationInfo.newCounter;
-    await user.save();
   }
 
+  // Register/check device ID when logging in with passkey (same logic as password login)
+  if (fpVisitorId) {
+    const incomingDeviceHash = sha256Hex(fpVisitorId);
+    console.log('[WEBAUTHN] login/finish - Device check', {
+      email,
+      hasStoredDevice: Boolean(user.registeredDeviceIdHash),
+      storedDeviceHash: user.registeredDeviceIdHash || null,
+      incomingDeviceHash,
+    });
+
+    if (!user.registeredDeviceIdHash) {
+      // First time login - register this device
+      user.registeredDeviceIdHash = incomingDeviceHash;
+      user.registeredAt = new Date();
+      console.log('[WEBAUTHN] login/finish - Device registered via passkey login');
+    } else if (user.registeredDeviceIdHash !== incomingDeviceHash) {
+      // Device mismatch - deny access (same restriction as password login)
+      console.warn('[WEBAUTHN] login/finish - Device mismatch — denying login', {
+        email,
+        storedDeviceHash: user.registeredDeviceIdHash,
+        incomingDeviceHash,
+      });
+      return res.status(403).json({ message: '❌ Access Denied — This account is already linked to another device.' });
+    }
+  } else {
+    console.warn('[WEBAUTHN] login/finish - No device fingerprint provided');
+  }
+
+  await user.save();
   challengeStore.delete(email);
 
   // Issue session cookie like password login
