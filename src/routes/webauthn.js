@@ -203,7 +203,20 @@ router.post('/register/finish', async (req, res) => {
   if (!email || !attestationResponse) return res.status(400).json({ message: 'Missing fields' });
 
   // Get device fingerprint (FingerprintJS visitorId) for device binding
-  const fpVisitorId = req.headers['x-fp-visitor-id'] || req.body.fpVisitorId || req.body.deviceIdRaw;
+  // Try multiple sources (header, body fields) with detailed logging
+  const fpVisitorIdFromHeader = req.headers['x-fp-visitor-id'];
+  const fpVisitorIdFromBody = req.body.fpVisitorId || req.body.deviceIdRaw;
+  const fpVisitorId = fpVisitorIdFromHeader || fpVisitorIdFromBody;
+  
+  console.log('[WEBAUTHN] register/finish - Device fingerprint check:', {
+    hasHeader: !!fpVisitorIdFromHeader,
+    hasBodyField: !!fpVisitorIdFromBody,
+    headerValue: fpVisitorIdFromHeader ? `${fpVisitorIdFromHeader.substring(0, 20)}...` : null,
+    bodyValue: fpVisitorIdFromBody ? `${fpVisitorIdFromBody.substring(0, 20)}...` : null,
+    finalFpVisitorId: fpVisitorId ? `${fpVisitorId.substring(0, 20)}...` : null,
+    allHeaders: Object.keys(req.headers).filter(h => h.toLowerCase().includes('fp') || h.toLowerCase().includes('device')),
+    bodyKeys: Object.keys(req.body || {}),
+  });
 
   const storedChallenge = challengeStore.get(email);
   if (!storedChallenge) return res.status(400).json({ message: 'No registration in progress' });
@@ -463,7 +476,20 @@ router.post('/login/finish', async (req, res) => {
   if (!email || !assertionResponse) return res.status(400).json({ message: 'Missing fields' });
 
   // Get device fingerprint (FingerprintJS visitorId) for device binding
-  const fpVisitorId = req.headers['x-fp-visitor-id'] || req.body.fpVisitorId || req.body.deviceIdRaw;
+  // Try multiple sources (header, body fields) with detailed logging
+  const fpVisitorIdFromHeader = req.headers['x-fp-visitor-id'];
+  const fpVisitorIdFromBody = req.body.fpVisitorId || req.body.deviceIdRaw;
+  const fpVisitorId = fpVisitorIdFromHeader || fpVisitorIdFromBody;
+  
+  console.log('[WEBAUTHN] login/finish - Device fingerprint check:', {
+    hasHeader: !!fpVisitorIdFromHeader,
+    hasBodyField: !!fpVisitorIdFromBody,
+    headerValue: fpVisitorIdFromHeader ? `${fpVisitorIdFromHeader.substring(0, 20)}...` : null,
+    bodyValue: fpVisitorIdFromBody ? `${fpVisitorIdFromBody.substring(0, 20)}...` : null,
+    finalFpVisitorId: fpVisitorId ? `${fpVisitorId.substring(0, 20)}...` : null,
+    allHeaders: Object.keys(req.headers).filter(h => h.toLowerCase().includes('fp') || h.toLowerCase().includes('device')),
+    bodyKeys: Object.keys(req.body || {}),
+  });
 
   const expectedChallenge = challengeStore.get(email);
   if (!expectedChallenge) return res.status(400).json({ message: 'No login in progress' });
@@ -740,17 +766,35 @@ router.post('/login/finish', async (req, res) => {
   challengeStore.delete(email);
 
   // Issue session cookie like password login
+  // Safari iOS requires secure cookies with SameSite=None for cross-origin
   const token = jwt.sign(
     { userId: user._id, email: user.email },
     process.env.JWT_SECRET || 'dev_secret',
     { expiresIn: '15m' }
   );
   const isProd = process.env.NODE_ENV === 'production';
-  res.cookie('token', token, {
+  
+  // For Safari iOS, ensure cookies work properly
+  const cookieOptions = {
     httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? 'none' : 'strict',
-    maxAge: 15 * 60 * 1000,
+    secure: isProd, // Must be true for SameSite=None
+    sameSite: isProd ? 'none' : 'lax', // Use 'lax' for localhost, 'none' for production
+    maxAge: 15 * 60 * 1000, // 15 minutes
+    path: '/', // Important for Safari
+  };
+  
+  // Only set SameSite to 'none' if secure is true (required by browsers)
+  if (isProd && cookieOptions.secure) {
+    cookieOptions.sameSite = 'none';
+  }
+  
+  res.cookie('token', token, cookieOptions);
+  
+  console.log('[WEBAUTHN] login/finish - Cookie set:', {
+    isProd,
+    secure: cookieOptions.secure,
+    sameSite: cookieOptions.sameSite,
+    hasToken: !!token,
   });
 
   return res.json({ verified: true });

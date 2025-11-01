@@ -22,6 +22,8 @@ app.use(
   cors({
     origin: process.env.CORS_ORIGIN,
     credentials: true,
+    exposedHeaders: ['x-fp-visitor-id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-fp-visitor-id'],
   })
 );
 
