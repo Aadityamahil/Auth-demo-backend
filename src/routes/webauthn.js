@@ -734,7 +734,16 @@ router.post('/login/finish', async (req, res) => {
     dbAuthenticator.counter = authenticationInfo.newCounter;
   }
 
-  // Register/check device ID when logging in with passkey (same logic as password login)
+  // WebAuthn/Passkeys are inherently device-bound - if the credential verifies,
+  // the user must be on the device where it was registered (credentials cannot be exported).
+  // Therefore, passkey verification is proof of device ownership, regardless of device hash.
+  
+  // For passkey login, we don't enforce device hash checking because:
+  // 1. Passkey verification itself proves device ownership
+  // 2. Device hash varies between browsers (Chrome vs Edge) even on same device
+  // 3. We don't want to update device hash on every passkey login (would break password login)
+  
+  // We only register device hash if it doesn't exist yet (for password login enforcement)
   if (fpVisitorId) {
     const incomingDeviceHash = sha256Hex(fpVisitorId);
     console.log('[WEBAUTHN] login/finish - Device check', {
@@ -742,24 +751,23 @@ router.post('/login/finish', async (req, res) => {
       hasStoredDevice: Boolean(user.registeredDeviceIdHash),
       storedDeviceHash: user.registeredDeviceIdHash || null,
       incomingDeviceHash,
+      passkeyVerified: true, // Passkey verification is proof of device ownership
+      action: 'No device hash enforcement for passkey login (passkey proves device ownership)',
     });
 
     if (!user.registeredDeviceIdHash) {
-      // First time login - register this device
+      // First time login - register this device hash (for password login enforcement)
       user.registeredDeviceIdHash = incomingDeviceHash;
       user.registeredAt = new Date();
       console.log('[WEBAUTHN] login/finish - Device registered via passkey login');
-    } else if (user.registeredDeviceIdHash !== incomingDeviceHash) {
-      // Device mismatch - deny access (same restriction as password login)
-      console.warn('[WEBAUTHN] login/finish - Device mismatch — denying login', {
-        email,
-        storedDeviceHash: user.registeredDeviceIdHash,
-        incomingDeviceHash,
-      });
-      return res.status(403).json({ message: '❌ Access Denied — This account is already linked to another device.' });
     }
+    // If device hash already exists, we don't update it on passkey login
+    // The stored hash is used for password login enforcement
+    // Passkey login doesn't need device hash checking (passkey itself is proof)
   } else {
-    console.warn('[WEBAUTHN] login/finish - No device fingerprint provided');
+    console.log('[WEBAUTHN] login/finish - No device fingerprint provided, but passkey verified so allowing login');
+    // Passkey verification succeeded, so we allow login even without device fingerprint
+    // This handles edge cases where fingerprint generation fails
   }
 
   await user.save();
