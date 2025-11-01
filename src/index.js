@@ -10,6 +10,7 @@ dotenv.config();
 
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
+const webauthnRoutes = require('./routes/webauthn');
 
 const app = express();
 
@@ -30,6 +31,7 @@ app.get('/health', (req, res) => {
 
 app.use('/auth', authRoutes);
 app.use('/admin', adminRoutes);
+app.use('/webauthn', webauthnRoutes);
 
 const MONGODB_URI = process.env.MONGODB_URI;
 const PORT = process.env.PORT || 4000;
